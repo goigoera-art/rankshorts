@@ -184,17 +184,27 @@
       el.innerHTML = '<span class="status-warn">Импорт по ссылке выключен:</span> сайт открыт как файл, а TikTok не отдаёт видео напрямую браузеру. Запустите <b>start.cmd</b> (локальный сервер) и установите yt-dlp — или скачайте ролик и загрузите файл.';
       return;
     }
-    try {
-      const r = await fetch('/api/status', { cache: 'no-store' });
-      const j = await r.json();
-      if (!j.ok) throw new Error('bad');
+    // Opened from the local server: same origin. Opened from the published site: look for the local
+    // server of THIS computer (start.cmd) on localhost.
+    const local = ['localhost', '127.0.0.1'].includes(location.hostname);
+    const bases = local ? [''] : ['http://localhost:8787', 'http://127.0.0.1:8787'];
+    let j = null;
+    for (const base of bases) {
+      try {
+        const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 2500);
+        const r = await fetch(base + '/api/status', { cache: 'no-store', signal: ctl.signal }); clearTimeout(t);
+        const d = await r.json(); if (d && d.ok) { j = d; S.api = base; break; }
+      } catch (e) { /* try next */ }
+    }
+    if (j) {
       S.server = { mode: 'server', ytdlp: j.ytdlp, version: j.version, tiktok: !!j.tiktok };
-      el.innerHTML = j.ytdlp
+      const via = local ? '' : ' Подключено к серверу на этом компьютере.';
+      el.innerHTML = (j.ytdlp
         ? `<span class="status-ok">Импорт по ссылке доступен</span> (yt-dlp ${esc(j.version)}): TikTok, YouTube Shorts и др.`
-        : '<span class="status-ok">Ссылки TikTok скачиваются</span> встроенным загрузчиком. Для YouTube, Instagram и других сайтов установите yt-dlp (<code>winget install yt-dlp</code>) и перезапустите start.cmd — до этого такие ролики можно только смотреть.';
-    } catch (e) {
-      S.server = { mode: 'static' };
-      el.innerHTML = '<span class="status-warn">Скачивание по ссылке здесь недоступно</span> (так работает сайт на телефоне и на хостинге). Ссылки TikTok, YouTube и Instagram откроются во встроенном плеере — только для просмотра. Для монтажа загрузите видеофайл с устройства. Скачивание работает на компьютере через <b>start.cmd</b>.';
+        : '<span class="status-ok">Ссылки TikTok скачиваются</span> встроенным загрузчиком. Для YouTube, Instagram и других сайтов установите yt-dlp (<code>winget install yt-dlp</code>) и перезапустите start.cmd — до этого такие ролики можно только смотреть.') + via;
+    } else {
+      S.api = ''; S.server = { mode: 'static' };
+      el.innerHTML = '<span class="status-warn">Скачивание по ссылке сейчас недоступно.</span> Оно работает через программу на компьютере: запустите <b>start.cmd</b> и обновите страницу (на этом же компьютере подключится само, в Chrome/Edge разрешите доступ к локальной сети, если спросит). На телефоне ссылки открываются только в плеере — для монтажа загрузите видеофайл.';
     }
   }
 
@@ -269,7 +279,7 @@
   async function fetchSrv(path, ctrl, ms) {
     ctrl.timedOut = false;
     const timer = setTimeout(() => { ctrl.timedOut = true; ctrl.abort(); }, ms);
-    try { return await fetch(path, { cache: 'no-store', signal: ctrl.signal }); }
+    try { return await fetch((S.api || '') + path, { cache: 'no-store', signal: ctrl.signal }); }
     catch (e) {
       if (ctrl.signal.aborted) throw new ImportError(ctrl.timedOut ? 'timeout' : 'cancelled', '', ctrl.timedOut);
       throw new ImportError('server_unreachable', String(e && e.message || e), true);
@@ -377,6 +387,8 @@
     const step = text => { if (seq === IMP.seq) setImportCard({ phase: 'loading', text }); };
     let canon = u, linkClip = null, reason = null;
     try {
+      // The download server (start.cmd) may have been started after the page was opened: look again.
+      if (S.server.mode !== 'server') { step('Ищу сервер скачивания на этом компьютере…'); await checkServer(); }
       // 1. Any TikTok link (short, redirecting, with tracking parameters) -> one canonical video.
       if (isTikTok(u)) {
         const info = tiktokInfo(u);
