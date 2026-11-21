@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b0d12">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>RankShorts — конструктор рейтинговых видео</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Montserrat:wght@900&family=Oswald:wght@700&family=Roboto+Condensed:wght@800&family=Rubik:wght@800&family=Russo+One&family=Unbounded:wght@800&display=swap">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo">R</span><b>RankShorts</b><small>рейтинговые видео 9:16</small></div>
+    <div class="top-actions">
+      <span id="saveStatus" class="save-status"></span>
+      <button id="newProject" class="ghost" type="button">Новый проект</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="panel left">
+      <section class="block">
+        <h2>Добавить видео</h2>
+        <label class="dropzone" id="dropzone">
+          <input type="file" id="fileInput" accept="video/*,.mp4,.webm,.mov,.m4v,.mkv" multiple hidden>
+          <span class="dz-icon">＋</span>
+          <b>Перетащите видео сюда</b>
+          <span>или нажмите, чтобы выбрать файлы (MP4, WebM, MOV)</span>
+        </label>
+        <form id="urlForm" class="url-row">
+          <input id="urlInput" type="url" placeholder="Ссылка на TikTok, YouTube Shorts…" autocomplete="off">
+          <button type="submit" id="urlBtn">Импорт</button>
+        </form>
+        <div id="importCard" class="import-card" hidden></div>
+        <p id="serverStatus" class="hint"></p>
+        <label class="check"><input type="checkbox" id="autoDetect"> Искать водяной знак TikTok при добавлении</label>
+      </section>
+
+      <section class="block grow">
+        <div class="sec-head"><h2>Очередь показа</h2><span id="clipCount" class="muted"></span></div>
+        <p class="hint">Порядок здесь — порядок клипов в ролике. Перетаскивайте карточки или жмите ▲▼. Место в рейтинге выбирается отдельно.</p>
+        <ol id="clipList" class="clip-list"></ol>
+        <div id="clipEmpty" class="empty">Пока нет клипов. Добавьте видео с устройства или по ссылке.</div>
+      </section>
+    </aside>
+
+    <section class="stage">
+      <div class="canvas-wrap"><canvas id="preview" width="720" height="1280"></canvas></div>
+      <div class="transport">
+        <button id="playBtn" class="play" type="button" title="Воспроизвести (пробел)">▶</button>
+        <input id="scrub" type="range" min="0" max="1000" value="0" step="1" aria-label="Позиция">
+        <span id="timeLabel" class="time">0:00.0 / 0:00.0</span>
+        <button id="muteBtn" class="ghost icon" type="button" title="Звук предпросмотра">🔊</button>
+      </div>
+      <div id="nowInfo" class="now"></div>
+    </section>
+
+    <aside class="panel right">
+      <nav class="tabs" id="tabs">
+        <button data-tab="clip" type="button">Клип</button>
+        <button data-tab="places" type="button">Места</button>
+        <button data-tab="design" type="button">Дизайн</button>
+        <button data-tab="export" type="button">Экспорт</button>
+      </nav>
+      <div id="inspector" class="inspector"></div>
+    </aside>
+  </main>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <script src="util.js"></script>
+  <script src="render.js"></script>
+  <script src="watermark.js"></script>
+  <script src="engine.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
