@@ -12,13 +12,23 @@ $Mime = @{
   '.mp4' = 'video/mp4'; '.webm' = 'video/webm'; '.mov' = 'video/quicktime'; '.mkv' = 'video/x-matroska'; '.m4v' = 'video/mp4'
 }
 
+# Programs installed by winget while this window was already open are not in this process's PATH yet.
+$env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + $env:Path
+
 function Find-YtDlp {
   $local = Join-Path $PSScriptRoot 'tools\yt-dlp.exe'
   if (Test-Path $local) { return $local }
   $cmd = Get-Command yt-dlp -ErrorAction SilentlyContinue
   if ($cmd) { return $cmd.Source }
+  $link = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links\yt-dlp.exe'
+  if (Test-Path $link) { return $link }
   return $null
 }
+
+# Pages that may talk to this server: the local site itself and the published site (so the phone-friendly
+# GitHub Pages version can use downloads on this computer). Nothing else: a random web page must not be
+# able to start downloads through your PC.
+$AllowedOrigins = @("http://localhost:$Port", "http://127.0.0.1:$Port", 'https://goigoera-art.github.io')
 
 function Send-Bytes($res, [byte[]]$bytes, [string]$type, [int]$code = 200) {
   $res.StatusCode = $code
@@ -128,6 +138,23 @@ try {
     $res = $ctx.Response
     try {
       $path = [Uri]::UnescapeDataString($req.Url.AbsolutePath)
+      $origin = $req.Headers['Origin']
+      $isApi = $path.StartsWith('/api/')
+      if ($isApi -and $origin) {
+        if ($AllowedOrigins -notcontains $origin) { Send-Json $res @{ error = 'origin_not_allowed' } 403; continue }
+        $res.AddHeader('Access-Control-Allow-Origin', $origin)
+        $res.AddHeader('Vary', 'Origin')
+        $res.AddHeader('Access-Control-Expose-Headers', 'X-File-Name, X-Import-Method, X-Video-Id')
+      }
+      if ($isApi -and $req.HttpMethod -eq 'OPTIONS') {
+        # CORS preflight (also Chrome's "public site -> localhost" check)
+        $res.AddHeader('Access-Control-Allow-Methods', 'GET, OPTIONS')
+        $res.AddHeader('Access-Control-Allow-Headers', 'Content-Type')
+        $res.AddHeader('Access-Control-Allow-Private-Network', 'true')
+        $res.AddHeader('Access-Control-Max-Age', '600')
+        $res.StatusCode = 204; $res.ContentLength64 = 0
+        continue
+      }
       if ($path -eq '/api/status') {
         $yt = Find-YtDlp
         $ver = ''
