@@ -18,7 +18,7 @@
   /* ---------- project model ---------- */
   function defaultProject() {
     return {
-      version: 1,
+      version: 2, safeZones: true, dragText: !(window.matchMedia && matchMedia('(pointer: coarse)').matches),
       title: 'Рейтинг *лучших*\n{кунг-фу малышей}',
       places: Array.from({ length: 5 }, () => ({ id: uid(), name: '' })),
       clips: [], style: { ...DEFAULT_STYLE },
@@ -33,8 +33,17 @@
     p.places = Array.isArray(p.places) ? p.places : d.places;
     p.clips = Array.isArray(p.clips) ? p.clips : [];
     p.clips.forEach(c => { c.watermarks = c.watermarks || []; c.wm = c.wm || { status: 'none' }; });
+    // v1 projects drew the title at the very top (hidden by the YouTube Shorts interface): move it down once.
+    if ((p.version || 1) < 2) {
+      if (!p.style.titleOverVideo) { p.style.bandHeight = Math.max(p.style.bandHeight || 0, DEFAULT_STYLE.bandHeight); p.style.titleY = DEFAULT_STYLE.titleY; }
+      else p.style.titleY = Math.max(p.style.titleY || 0, DEFAULT_STYLE.titleY);
+      p.style.titleX = 50; p.version = 2;
+    }
+    if (p.safeZones == null) p.safeZones = true;
+    if (p.dragText == null) p.dragText = d.dragText;
     return p;
   }
+  const fmtP = t => { t = Math.max(0, t || 0); const m = Math.floor(t / 60); const s = (t - m * 60).toFixed(2); return `${m}:${s.length < 5 ? '0' : ''}${s}`; };
   const clipById = id => S.p.clips.find(c => c.id === id);
   const selClip = () => clipById(S.sel);
   const placeIdx = id => S.p.places.findIndex(p => p.id === id);
@@ -528,6 +537,7 @@
     $('#nowInfo').textContent = info;
     const curId = seg ? seg.clip.id : null;
     $$('#clipList .clip').forEach(li => li.classList.toggle('playing', li.dataset.id === curId));
+    updateTimelineHead();
   }
 
   /* ---------- clip list ---------- */
@@ -563,10 +573,265 @@
         <div class="btns">
           <button data-act="up" title="Раньше" ${i === 0 ? 'disabled' : ''}>▲</button>
           <button data-act="down" title="Позже" ${i === clips.length - 1 ? 'disabled' : ''}>▼</button>
+          <button data-act="dup" title="Дублировать" ${c.kind === 'link' ? 'disabled' : ''}>⧉</button>
           <button data-act="del" title="Удалить">✕</button>
         </div>
       </li>`).join('');
+    renderTimeline();
     updateTransport(S.engine.time(), S.engine.total);
+  }
+
+  /* ---------- editing: duplicate, split, trim ---------- */
+  // A clip is a fragment [trimStart, trimStart + duration] of a source file (videoKey). Several clips may
+  // point to the same file: duplicating or splitting never touches the imported file itself.
+  function cloneClip(c) {
+    const o = JSON.parse(JSON.stringify(c, (k, v) => (k[0] === '_' ? undefined : v)));
+    o.id = uid();
+    o.watermarks = (o.watermarks || []).map(r => ({ ...r, id: uid() }));
+    return o;
+  }
+  function insertAfter(c, copy) { S.p.clips.splice(S.p.clips.indexOf(c) + 1, 0, copy); }
+
+  function duplicateClip(c) {
+    if (!c) { toast('Выберите клип, который нужно дублировать.', 'info'); return null; }
+    if (S.exp) { toast('Дождитесь окончания сборки.', 'warn'); return null; }
+    if (c.kind === 'link') { toast('Клип-ссылку дублировать нельзя: сначала загрузите видеофайл.', 'warn'); return null; }
+    const copy = cloneClip(c);
+    copy.placeId = freePlaceId();
+    insertAfter(c, copy);
+    S.sel = copy.id; S.tab = 'clip';
+    save(); renderTabs(); renderClipList(); renderInspector(); refreshSegments(copy.id, 0.001);
+    toast(`Копия создана: #${S.p.clips.indexOf(copy) + 1} (${fmtP(copy.trimStart)}–${fmtP(copy.trimStart + clipDur(copy))}). Её можно обрезать и двигать отдельно — исходный файл не изменился.`, 'ok', 5000);
+    return copy;
+  }
+
+  function splitClip(c, t) {
+    if (!c) { toast('Выберите клип.', 'info'); return null; }
+    if (S.exp) { toast('Дождитесь окончания сборки.', 'warn'); return null; }
+    if (c.kind === 'link') { toast('Разделить можно только загруженное видео, а не ссылку.', 'warn'); return null; }
+    const a = c.trimStart || 0, b = a + clipDur(c);
+    if (!(t > a + 0.1 && t < b - 0.1)) {
+      toast(`Позиция ${fmtP(t)} вне фрагмента ${fmtP(a)}–${fmtP(b)}. Поставьте позицию внутрь фрагмента (не ближе 0,1 с к краям).`, 'warn', 6000);
+      return null;
+    }
+    const right = cloneClip(c);
+    right.trimStart = r2(t); right.duration = r2(b - t); right.caption = ''; right.captionDelay = 0; right.placeId = freePlaceId();
+    c.duration = r2(t - a); c.captionDelay = Math.min(c.captionDelay || 0, c.duration);
+    insertAfter(c, right);
+    save(); renderClipList(); if (S.tab === 'clip') renderInspector(); refreshSegments(right.id, 0.001);
+    const n = S.p.clips.indexOf(c) + 1;
+    toast(`Разделено: #${n} ${fmtP(a)}–${fmtP(t)} и #${n + 1} ${fmtP(t)}–${fmtP(b)}. Ненужный кусок удалите кнопкой ✕.`, 'ok', 5000);
+    return right;
+  }
+  // Split the clip under the main preview playhead.
+  function splitAtPlayhead() {
+    const eng = S.engine;
+    if (eng.cur < 0) { toast('Сначала поставьте позицию в предпросмотре на нужный фрагмент.', 'info'); return; }
+    eng.pause();
+    const seg = eng.segs[eng.cur];
+    splitClip(seg.clip, (seg.clip.trimStart || 0) + eng.local());
+  }
+
+  function setTrim(c, inT, outT, final = true) {
+    const src = c.srcDuration || 0;
+    inT = clamp(inT, 0, Math.max(0, src - 0.1));
+    outT = clamp(outT, inT + 0.1, src);
+    c.trimStart = r2(inT); c.duration = r2(outT - inT);
+    c.captionDelay = Math.min(c.captionDelay || 0, c.duration);
+    syncTrimUI(c);
+    if (final) { save(); renderClipList(); refreshSegments(c.id, 0.001); }
+  }
+  function onTrimField(el) {
+    const c = selClip(); if (!c) return;
+    const v = parseFloat(el.value); if (!isFinite(v)) { syncTrimUI(c); return; }
+    const a = c.trimStart || 0, b = a + clipDur(c);
+    if (el.dataset.tr === 'in') setTrim(c, v, b > v + 0.1 ? b : v + (b - a));
+    else if (el.dataset.tr === 'out') setTrim(c, a, v);
+    else setTrim(c, a, a + v);
+  }
+  function syncTrimUI(c) {
+    const src = c.srcDuration || 0, a = c.trimStart || 0, d = clipDur(c);
+    const sum = $('#trimSum'); if (sum) sum.textContent = `${fmtP(a)} – ${fmtP(a + d)} · ${d.toFixed(2)} с`;
+    const sel = $('#srcStrip .strip-sel');
+    if (sel && src) { sel.style.left = (a / src * 100) + '%'; sel.style.width = (d / src * 100) + '%'; }
+    const set = (k, v) => { const i = $(`[data-tr="${k}"]`); if (i && document.activeElement !== i) i.value = r2(v); };
+    set('in', a); set('out', a + d); set('len', d);
+    const cd = $$('[data-cf="captionDelay"]'); cd.forEach(i => { i.max = r2(d); });
+  }
+  function setStripPos(c, t) {
+    S.trimPos = t;
+    const src = c.srcDuration || 0, p = $('#srcStrip .strip-play'), l = $('#stripPos');
+    if (p && src) p.style.left = (clamp(t / src, 0, 1) * 100) + '%';
+    if (l) l.textContent = `▶ ${fmtP(t)}`;
+  }
+
+  /* Thumbnails of the whole source along the strip (cached per imported file). */
+  const thumbCache = new Map();
+  async function ensureThumbs(c) {
+    const key = c.videoKey, url = S.urls.get(key); if (!url) return;
+    let e = thumbCache.get(key);
+    if (e) { drawStripThumbs(c); return; }
+    e = { frames: [], n: clamp(Math.round((c.srcDuration || 1) * 2), 6, 16) };
+    thumbCache.set(key, e);
+    const v = document.createElement('video'); v.muted = true; v.preload = 'auto'; v.playsInline = true; v.src = url;
+    try {
+      await waitEvent(v, 'loadeddata', 20000);
+      const dur = c.srcDuration || await fixDuration(v);
+      for (let i = 0; i < e.n; i++) {
+        await seekVideo(v, Math.min(dur - 0.05, dur * (i + 0.5) / e.n));
+        const cv = document.createElement('canvas'); cv.height = 64; cv.width = Math.round(64 * v.videoWidth / v.videoHeight) || 36;
+        cv.getContext('2d').drawImage(v, 0, 0, cv.width, cv.height);
+        e.frames[i] = cv;
+        if (S.sel && clipById(S.sel) && clipById(S.sel).videoKey === key) drawStripThumbs(clipById(S.sel));
+      }
+    } catch (err) { /* the strip just stays without pictures */ }
+    finally { v.removeAttribute('src'); v.load(); }
+  }
+  function drawStripThumbs(c) {
+    const cv = $('#srcStrip .strip-thumbs'); const e = thumbCache.get(c.videoKey); if (!cv) return;
+    const W = Math.max(50, Math.round(cv.clientWidth * (window.devicePixelRatio || 1))), H = Math.round(cv.clientHeight * (window.devicePixelRatio || 1)) || 60;
+    if (cv.width !== W || cv.height !== H) { cv.width = W; cv.height = H; }
+    const ctx = cv.getContext('2d'); ctx.fillStyle = '#0b0d12'; ctx.fillRect(0, 0, W, H);
+    if (!e) return;
+    const cw = W / e.n;
+    e.frames.forEach((f, i) => {
+      if (!f) return;
+      const s = Math.max(cw / f.width, H / f.height), sw = cw / s, sh = H / s;
+      ctx.drawImage(f, (f.width - sw) / 2, (f.height - sh) / 2, sw, sh, i * cw, 0, Math.ceil(cw), H);
+    });
+  }
+
+  /* The source strip in the clip tab: drag the edges or the whole fragment; click to set the position. */
+  function initStrip(c) {
+    const strip = $('#srcStrip'); if (!strip) { syncTrimUI(c); return; }
+    const pl = $('video.src-player');
+    syncTrimUI(c); setStripPos(c, S.trimPos != null && S.trimPosClip === c.id ? S.trimPos : (c.trimStart || 0));
+    S.trimPosClip = c.id;
+    ensureThumbs(c); drawStripThumbs(c);
+    if (pl) {
+      const onT = () => { if (selClip() === c) setStripPos(c, pl.currentTime); };
+      pl.addEventListener('timeupdate', onT); pl.addEventListener('seeked', onT);
+      pl.addEventListener('loadedmetadata', () => { if (Math.abs(pl.currentTime - S.trimPos) > 0.05) pl.currentTime = S.trimPos; }, { once: true });
+    }
+    const seekPl = t => { setStripPos(c, t); if (pl && pl.readyState >= 1) pl.currentTime = t; };
+    const tAt = e => { const r = strip.getBoundingClientRect(); return clamp((e.clientX - r.left) / r.width, 0, 1) * (c.srcDuration || 0); };
+    let drag = null;
+    strip.onpointerdown = e => {
+      const t = tAt(e); const a = c.trimStart || 0, b = a + clipDur(c);
+      const kind = e.target.classList.contains('l') ? 'in' : e.target.classList.contains('r') ? 'out' : e.target.closest('.strip-sel') ? 'move' : 'scrub';
+      drag = { kind, t0: t, a, b };
+      strip.setPointerCapture(e.pointerId); e.preventDefault();
+      if (kind === 'scrub') seekPl(t);
+    };
+    strip.onpointermove = e => {
+      if (!drag) return; const t = tAt(e);
+      if (drag.kind === 'scrub') seekPl(t);
+      else if (drag.kind === 'in') { setTrim(c, Math.min(t, drag.b - 0.1), drag.b, false); seekPl(c.trimStart); }
+      else if (drag.kind === 'out') { setTrim(c, drag.a, Math.max(t, drag.a + 0.1), false); seekPl(c.trimStart + clipDur(c)); }
+      else { const len = drag.b - drag.a; const na = clamp(drag.a + (t - drag.t0), 0, (c.srcDuration || 0) - len); setTrim(c, na, na + len, false); }
+    };
+    strip.onpointerup = () => {
+      if (!drag) return; const k = drag.kind; drag = null;
+      if (k !== 'scrub') { save(); renderClipList(); refreshSegments(c.id, 0.001); }
+    };
+  }
+
+  /* ---------- project timeline (all fragments in queue order) ---------- */
+  function renderTimeline() {
+    const tr = $('#tlTrack'); if (!tr) return;
+    const segs = buildSegments();
+    const total = segs.reduce((a, s) => a + s.dur, 0);
+    $('#tlInfo').textContent = segs.length ? `${segs.length} фрагм. · ${fmtP(total)}` : '';
+    tr.innerHTML = segs.length ? segs.map(s => {
+      const c = s.clip, n = S.p.clips.indexOf(c) + 1, a = c.trimStart || 0;
+      return `<div class="tl-block ${c.id === S.sel ? 'sel' : ''}" draggable="true" data-id="${c.id}" style="flex-grow:${Math.max(0.3, s.dur).toFixed(2)};${c.thumb ? `background-image:url(${c.thumb})` : ''}" title="#${n} · ${esc(c.caption || c.fileName)} · ${fmtP(a)}–${fmtP(a + s.dur)}">
+        <b>#${n}</b><span>${esc(c.caption || c.fileName)}</span><small>${fmtP(a)}–${fmtP(a + s.dur)}</small></div>`;
+    }).join('') : '<div class="tl-empty">Импортируйте видео — фрагменты появятся здесь</div>';
+    ['tlSplit', 'tlDup', 'tlDel'].forEach(id => { const b = $('#' + id); if (b) b.disabled = !segs.length; });
+    updateTimelineHead();
+  }
+  function updateTimelineHead() {
+    const head = $('#tlHead'), eng = S.engine; if (!head || !eng) return;
+    const seg = eng.cur >= 0 ? eng.segs[eng.cur] : null;
+    const el = seg && $(`#tlTrack .tl-block[data-id="${seg.clip.id}"]`);
+    $$('#tlTrack .tl-block').forEach(b => b.classList.toggle('playing', !!seg && b.dataset.id === seg.clip.id));
+    if (!el) { head.style.display = 'none'; return; }
+    head.style.display = 'block';
+    head.style.left = (el.offsetLeft + el.offsetWidth * clamp(eng.local() / seg.dur, 0, 1)) + 'px';
+  }
+  function bindTimeline() {
+    const tr = $('#tlTrack');
+    tr.addEventListener('click', e => {
+      const b = e.target.closest('.tl-block'); if (!b) return;
+      const c = clipById(b.dataset.id); if (!c) return;
+      const r = b.getBoundingClientRect(), frac = clamp((e.clientX - r.left) / r.width, 0, 1);
+      selectClip(c.id, false); S.engine.pause(); seekToClip(c, frac * clipDur(c));
+    });
+    let dragId = null, drop = null;
+    const clear = () => $$('.drop-l,.drop-r', tr).forEach(x => x.classList.remove('drop-l', 'drop-r'));
+    tr.addEventListener('dragstart', e => { const b = e.target.closest('.tl-block'); if (!b) return; dragId = b.dataset.id; e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', dragId); b.classList.add('dragging'); });
+    tr.addEventListener('dragover', e => {
+      if (!dragId) return; e.preventDefault(); clear(); drop = null;
+      const b = e.target.closest('.tl-block');
+      if (b && b.dataset.id !== dragId) { const r = b.getBoundingClientRect(); const after = e.clientX > r.left + r.width / 2; b.classList.add(after ? 'drop-r' : 'drop-l'); drop = { id: b.dataset.id, after }; }
+    });
+    tr.addEventListener('drop', e => {
+      if (!dragId) return; e.preventDefault(); e.stopPropagation();
+      if (drop) { const ids = S.p.clips.map(c => c.id).filter(x => x !== dragId); moveClip(dragId, ids.indexOf(drop.id) + (drop.after ? 1 : 0)); }
+    });
+    tr.addEventListener('dragend', () => { dragId = null; drop = null; clear(); $$('.dragging', tr).forEach(x => x.classList.remove('dragging')); });
+    $('#tlSplit').addEventListener('click', splitAtPlayhead);
+    $('#tlDup').addEventListener('click', () => duplicateClip(selClip() || (S.engine.cur >= 0 ? S.engine.segs[S.engine.cur].clip : null)));
+    $('#tlDel').addEventListener('click', () => { const c = selClip(); if (c) deleteClip(c.id); else toast('Выберите фрагмент.', 'info'); });
+    window.addEventListener('resize', () => { updateTimelineHead(); const c = selClip(); if (c && S.tab === 'clip') drawStripThumbs(c); });
+  }
+
+  /* ---------- YouTube Shorts safe zones + moving text in the frame ---------- */
+  function layoutSafeOverlay() {
+    const o = $('#safeOverlay'); if (!o) return;
+    const pct = v => (v * 100).toFixed(1) + '%';
+    Object.assign(o.querySelector('.sz.top').style, { top: 0, left: 0, right: 0, height: pct(SAFE.top) });
+    Object.assign(o.querySelector('.sz.bottom').style, { top: pct(SAFE.bottom), left: 0, right: 0, bottom: 0 });
+    Object.assign(o.querySelector('.sz.right').style, { top: pct(SAFE.rightTop), height: pct(SAFE.rightBottom - SAFE.rightTop), left: pct(SAFE.right), right: 0 });
+  }
+  function updateSafeWarn() {
+    const el = $('#safeWarn'); if (!el) return;
+    $('#safeOverlay').hidden = !S.p.safeZones;
+    if (!S.p.safeZones) { el.textContent = ''; return; }
+    const iss = R.safeIssues();
+    el.innerHTML = iss.length ? '⚠ ' + iss.map(esc).join(' ') : '<span class="status-ok">✓ Текст в безопасной зоне Shorts.</span>';
+  }
+  function bindStageTools() {
+    const st = $('#safeToggle'), dt = $('#dragToggle'), wrap = $('.canvas-wrap');
+    st.checked = !!S.p.safeZones; dt.checked = !!S.p.dragText; wrap.classList.toggle('drag-on', !!S.p.dragText);
+    st.addEventListener('change', () => { S.p.safeZones = st.checked; save(); updateSafeWarn(); });
+    dt.addEventListener('change', () => { S.p.dragText = dt.checked; wrap.classList.toggle('drag-on', dt.checked); save(); });
+    layoutSafeOverlay();
+    setInterval(() => { if (!S.exp) updateSafeWarn(); }, 600);
+
+    const cv = $('#preview'); let drag = null, raf = 0;
+    const pt = e => { const r = cv.getBoundingClientRect(); return { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height }; };
+    const inBox = (b, p, pad = 0.015) => b && p.x >= b.x - pad && p.x <= b.x + b.w + pad && p.y >= b.y - pad && p.y <= b.y + b.h + pad;
+    const hit = p => { const B = R.boxes; if (S.p.style.captionPos === 'free' && inBox(B.caption, p)) return 'caption'; if (inBox(B.title, p)) return 'title'; if (inBox(B.list, p)) return 'list'; return null; };
+    const KEYS = { title: ['titleX', 'titleY', 5, 95, 3, 95], list: ['listX', 'listY', 0, 80, 3, 95], caption: ['captionX', 'captionY', 5, 95, 3, 97] };
+    cv.addEventListener('pointermove', e => {
+      if (!S.p.dragText || S.exp) { cv.style.cursor = ''; return; }
+      const p = pt(e);
+      if (!drag) { cv.style.cursor = hit(p) ? 'grab' : ''; return; }
+      const [kx, ky, x0, x1, y0, y1] = KEYS[drag.k], s = S.p.style;
+      s[kx] = r2(clamp(drag.sx + (p.x - drag.p0.x) * 100, x0, x1));
+      s[ky] = r2(clamp(drag.sy + (p.y - drag.p0.y) * 100, y0, y1));
+      cancelAnimationFrame(raf); raf = requestAnimationFrame(() => { S.engine.redraw(); updateSafeWarn(); });
+    });
+    cv.addEventListener('pointerdown', e => {
+      if (!S.p.dragText || S.exp) return;
+      const p = pt(e), k = hit(p); if (!k) return;
+      const [kx, ky] = KEYS[k];
+      drag = { k, p0: p, sx: S.p.style[kx], sy: S.p.style[ky] };
+      cv.setPointerCapture(e.pointerId); cv.style.cursor = 'grabbing'; e.preventDefault();
+    });
+    const end = () => { if (!drag) return; drag = null; cv.style.cursor = ''; save(); if (S.tab === 'design') renderInspector(); updateSafeWarn(); };
+    cv.addEventListener('pointerup', end); cv.addEventListener('pointercancel', end);
   }
 
   function moveClip(id, toIndex) {
@@ -646,6 +911,7 @@
       if (act === 'up') moveClip(id, idx - 1);
       else if (act === 'down') moveClip(id, idx + 1);
       else if (act === 'del') deleteClip(id);
+      else if (act === 'dup') duplicateClip(clipById(id));
       else if (!e.target.closest('select')) selectClip(id);
     });
     list.addEventListener('change', e => {
@@ -716,10 +982,27 @@
       <div class="field"><label>Подпись к клипу (видна только во время этого клипа)</label>
         <input type="text" data-cf="caption" value="${esc(c.caption)}" placeholder="Например: Крокодил 🐊" maxlength="80"></div>
       <div class="field"><label>Место в рейтинге</label><select data-cf="placeId">${placeOptions(c.placeId)}</select></div>
-      <div class="group">
-        <h3>Тайминг</h3>
-        ${rangeField('Начало в исходнике, с', 'data-cf="trimStart"', r2(c.trimStart || 0), 0, r2(Math.max(0, src - 0.1)), 0.1)}
-        ${rangeField('Длительность показа, с', 'data-cf="duration"', r2(dur), 0.1, r2(Math.max(0.1, src - (c.trimStart || 0))), 0.1)}
+      <div class="group" id="trimGroup">
+        <div class="sec-head"><h3>Фрагмент исходника</h3><small id="trimSum"></small></div>
+        ${S.urls.has(c.videoKey) ? `
+        <div class="strip" id="srcStrip" title="Тяните края или весь фрагмент; щелчок — позиция в плеере исходника">
+          <canvas class="strip-thumbs"></canvas>
+          <div class="strip-sel"><span class="strip-h l"></span><span class="strip-h r"></span></div>
+          <div class="strip-play"></div>
+        </div>
+        <div class="strip-scale"><span>0:00</span><span id="stripPos"></span><span>${fmtP(src)}</span></div>` : ''}
+        <div class="grid3">
+          <div class="field"><label>Начало, с</label><input type="number" data-tr="in" min="0" max="${r2(src)}" step="0.01" value="${r2(c.trimStart || 0)}"></div>
+          <div class="field"><label>Конец, с</label><input type="number" data-tr="out" min="0" max="${r2(src)}" step="0.01" value="${r2((c.trimStart || 0) + dur)}"></div>
+          <div class="field"><label>Длина, с</label><input type="number" data-tr="len" min="0.1" max="${r2(src)}" step="0.01" value="${r2(dur)}"></div>
+        </div>
+        <div class="actions tight">
+          <button type="button" class="small" data-act="mark-in" title="Начало фрагмента = позиция плеера исходника (клавиша I)">⟦ Начало здесь</button>
+          <button type="button" class="small" data-act="mark-out" title="Конец фрагмента = позиция плеера исходника (клавиша O)">Конец здесь ⟧</button>
+          <button type="button" class="small" data-act="split-here" title="Разрезать фрагмент на два в позиции плеера исходника">✂ Разделить</button>
+          <button type="button" class="small" data-act="dup-clip" title="Независимая копия этого фрагмента (клавиша D)">⧉ Дублировать</button>
+        </div>
+        <p class="hint" style="margin:0">Полоса — весь исходный ролик, светлая рамка — выбранный фрагмент. Начать можно с любого места, хоть с середины. Чтобы убрать кусок из середины: «Разделить» в начале и в конце куска, затем удалить лишний фрагмент.</p>
         ${rangeField('Подпись появляется через, с', 'data-cf="captionDelay"', r2(Math.min(c.captionDelay || 0, dur)), 0, r2(dur), 0.1)}
       </div>
       <div class="group">
@@ -835,7 +1118,10 @@
         ${rng('Размер заголовка', 'titleSize', 3, 12, 0.1)}
         <div class="grid2">${color('Текст', 'titleColor')}${color('Фон полосы', 'bandColor')}${color('Акцент 1', 'accent1')}${color('Акцент 2', 'accent2')}</div>
         ${chk('Заголовок поверх видео (без полосы)', 'titleOverVideo')}
-        ${s.titleOverVideo ? rng('Положение заголовка по высоте, %', 'titleY', 3, 40, 0.5) : rng('Высота полосы заголовка, %', 'bandHeight', 6, 30, 0.5)}
+        <div class="grid2">${rng('Заголовок по горизонтали, %', 'titleX', 5, 95, 0.5)}${rng('Заголовок по высоте, %', 'titleY', 3, 90, 0.5)}</div>
+        ${s.titleOverVideo ? '' : rng('Высота полосы заголовка, %', 'bandHeight', 0, 45, 0.5)}
+        <button type="button" class="small" data-act="safe-title">Вернуть текст в безопасную зону Shorts</button>
+        <p class="hint" style="margin:0">Заголовок, список мест и подпись (в режиме «Свободно») можно двигать мышью или пальцем прямо в кадре — включите «Двигать текст в кадре» под предпросмотром.</p>
       </div>
       <div class="group">
         <h3>Список мест</h3>
@@ -991,7 +1277,12 @@
         eng.on('ended', () => clearInterval(chk));
         eng.play();
       });
-      await new Promise(r => setTimeout(r, 300));
+      // Keep drawing the true last frame for a moment so the encoder is flushed with correct frames
+      // (an idle canvas let stale frames appear at the very end of the file).
+      if (!cancelled && !failed) await new Promise(res => {
+        const until = performance.now() + 260;
+        (function f() { eng.draw(); if (performance.now() < until) requestAnimationFrame(f); else res(); })();
+      });
       if (rec.state !== 'inactive') rec.stop();
       await stopped;
       stream.getTracks().forEach(t => t.stop());
@@ -1039,6 +1330,7 @@
   /* ---------- watermark editor canvas ---------- */
   function afterClipTab() {
     const c = selClip(); if (!c) return;
+    if (c.kind !== 'link') initStrip(c);
     renderCleanState();
     const url = S.urls.get(c.videoKey);
     if (S.wm.key !== c.id) {
@@ -1174,6 +1466,7 @@
     const el = $('#inspector');
     const handle = (e, final) => {
       const t = e.target;
+      if (t.dataset.tr) { if (final) onTrimField(t); return; }
       if (t.dataset.cf) { if (!final && t.type === 'number') return; onClipField(t, final); }
       else if (t.dataset.rf) { if (!final && t.type === 'number') return; onRegionField(t, final); }
       else if (t.dataset.style) { if (!final && t.type === 'number') return; onStyleField(t, final); }
@@ -1217,6 +1510,22 @@
         case 'switch-method': if (c) { const r = c.watermarks.find(x => x.id === rid); r.method = b.dataset.val; save(); renderInspector(); renderClipList(); S.engine.redraw(); } break;
         case 't0-now': case 't1-now': if (c) { const r = c.watermarks.find(x => x.id === rid); r[act === 't0-now' ? 't0' : 't1'] = r2(S.wm.time); save(); renderInspector(); S.engine.redraw(); } break;
         case 'del-clip': if (c) deleteClip(c.id); break;
+        case 'dup-clip': duplicateClip(c); break;
+        case 'mark-in': case 'mark-out': case 'split-here': {
+          if (!c || c.kind === 'link') break;
+          const pl = $('video.src-player'); const t = pl ? pl.currentTime : (S.trimPos || 0);
+          const a = c.trimStart || 0, b = a + clipDur(c);
+          if (act === 'split-here') { if (pl) pl.pause(); splitClip(c, t); }
+          else if (act === 'mark-in') setTrim(c, t, t < b - 0.1 ? b : Math.min(c.srcDuration, t + Math.max(1, b - a)));
+          else if (t > a + 0.1) setTrim(c, a, t);
+          else toast('Конец должен быть правее начала: подвиньте плеер исходника вперёд.', 'warn', 4000);
+          break;
+        }
+        case 'safe-title': {
+          const s = S.p.style; s.titleX = 50; s.titleY = DEFAULT_STYLE.titleY;
+          if (!s.titleOverVideo) s.bandHeight = Math.max(s.bandHeight, DEFAULT_STYLE.bandHeight);
+          save(); renderInspector(); S.engine.redraw(); updateSafeWarn(); break;
+        }
         case 'link-download': if (c) downloadIntoClip(c); break;
         case 'link-attach': if (c) {
           const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'video/*,.mp4,.webm,.mov,.m4v,.mkv';
@@ -1305,9 +1614,12 @@
     sc.addEventListener('change', () => { S.scrubbing = false; });
     $('#muteBtn').addEventListener('click', () => { const m = !S.engine.muted; S.engine.setMuted(m); $('#muteBtn').textContent = m ? '🔇' : '🔊'; });
     document.addEventListener('keydown', e => {
-      if (e.code !== 'Space' || S.exp) return;
-      if (e.target.closest('input,textarea,select,button,[contenteditable]')) return;
-      e.preventDefault(); togglePlay();
+      if (S.exp || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.target && e.target.closest && e.target.closest('input,textarea,select,button,[contenteditable],video')) return;
+      if (document.querySelector('.modal-wrap')) return;
+      if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
+      else if (e.code === 'KeyS') { e.preventDefault(); splitAtPlayhead(); }
+      else if (e.code === 'KeyD') { e.preventDefault(); duplicateClip(selClip()); }
     });
     document.addEventListener('visibilitychange', () => { if (S.exp && document.hidden) toast('Вкладка ушла в фон во время сборки — запись может «застыть». Вернитесь на вкладку.', 'warn', 8000); });
 
@@ -1368,7 +1680,7 @@
       else toast(`Не удалось воспроизвести клип ${n}: ${esc(e && e.message || e)}. Возможно, формат не поддерживается — перекодируйте в MP4 (H.264).`, 'error', 9000);
     });
 
-    bindGlobal(); bindClipList(); bindInspector(); bindImportCard();
+    bindGlobal(); bindClipList(); bindInspector(); bindImportCard(); bindTimeline(); bindStageTools();
     renderAll(); setSaved(saved_text());
     S.engine.setSegments(buildSegments());
     S.engine.draw();
@@ -1379,6 +1691,7 @@
   function saved_text() { return S.p.clips.length ? 'Проект загружен' : ''; }
 
   // test hooks (used for automated checks; harmless for users)
+  S.splitClip = splitClip; S.duplicateClip = duplicateClip; S.setTrim = setTrim; S.splitAtPlayhead = splitAtPlayhead; S.safeIssues = () => R.safeIssues();
   S.addFile = addFile; S.importUrl = importUrl; S.runExport = runExport; S.selectClip = selectClip; S.moveClip = moveClip;
   S.render = () => { renderAll(); S.engine.redraw(); };
 

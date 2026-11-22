@@ -14,16 +14,26 @@ const FONTS = [
 const DEFAULT_STYLE = {
   font: 'Montserrat',
   titleSize: 7.4, titleColor: '#ffffff', accent1: '#ff2b2b', accent2: '#2ee6ff',
-  bandHeight: 13, bandColor: '#000000', titleOverVideo: false, titleY: 8,
+  // Title sits below the top edge: YouTube Shorts on a phone covers roughly the top 13 % (channel name, controls).
+  bandHeight: 26, bandColor: '#000000', titleOverVideo: false, titleX: 50, titleY: 18.5,
   strokeColor: '#000000', strokeWidth: 6,
   listX: 7, listY: 33, listGap: 7.6, numberSize: 6.2, numberColor: '#ffffff',
   medalColors: true, highlightColor: '#ffe14d', revealedOpacity: 0.45, transition: 0.35,
-  captionPos: 'list', captionX: 50, captionY: 78, captionSize: 4.8,
+  captionPos: 'list', captionX: 50, captionY: 70, captionSize: 4.8,
   captionColor: '#ffffff', captionStrokeColor: '#000000', captionStrokeWidth: 6,
   captionBg: '#000000', captionBgOpacity: 0, captionAnim: true,
 };
 
 const MEDAL = ['#FFD12E', '#FF8A1F', '#FF3434'];
+
+/* Areas of a 9:16 frame that the YouTube Shorts app (iPhone) usually covers. Fractions of width/height.
+   Approximate: the app layout differs a little between devices and versions. */
+const SAFE = {
+  top: 0.13,                 // status bar, channel name, search/menu buttons
+  bottom: 0.76,              // from here down: title, description, music, subscribe
+  right: 0.86,               // right column of buttons (like, comments, share)...
+  rightTop: 0.38, rightBottom: 0.76,   // ...between these heights
+};
 
 const R = (() => {
   const tmp = document.createElement('canvas');
@@ -154,17 +164,18 @@ const R = (() => {
     let size = W * s.titleSize / 100;
     ctx.font = fontOf(s, size);
     const widthOf = segs => segs.reduce((a, g) => a + ctx.measureText(g.t).width, 0);
-    const maxw = Math.max(...parsed.map(widthOf));
-    if (maxw > W * 0.92) size *= W * 0.92 / maxw;
-    let lh = size * 1.12;
-    if (lay.band > 0 && lh * lines.length > lay.band * 0.9) { size *= lay.band * 0.9 / (lh * lines.length); lh = size * 1.12; }
-    ctx.font = fontOf(s, size);
+    let maxw = Math.max(...parsed.map(widthOf));
+    if (maxw > W * 0.92) { size *= W * 0.92 / maxw; ctx.font = fontOf(s, size); maxw = Math.max(...parsed.map(widthOf)); }
+    const lh = size * 1.12;
     const total = lh * lines.length;
-    const cy = lay.band > 0 ? lay.band / 2 : H * s.titleY / 100;
+    // Free position (centre of the text block), kept inside the frame.
+    const cx = clamp(W * (s.titleX != null ? s.titleX : 50) / 100, maxw / 2 + W * 0.02, W - maxw / 2 - W * 0.02);
+    const cy = H * (s.titleY != null ? s.titleY : 18.5) / 100;
+    R.boxes.title = { x: (cx - maxw / 2) / W, y: (cy - total / 2) / H, w: maxw / W, h: total / H };
     ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
     parsed.forEach((segs, i) => {
       const y = cy - total / 2 + lh * (i + 0.5);
-      let x = (W - widthOf(segs)) / 2;
+      let x = cx - widthOf(segs) / 2;
       for (const g of segs) {
         text(ctx, g.t, x, y, { fill: g.c === 1 ? s.accent1 : g.c === 2 ? s.accent2 : s.titleColor, stroke: s.strokeColor, sw: s.strokeWidth * k });
         x += ctx.measureText(g.t).width;
@@ -202,6 +213,8 @@ const R = (() => {
     }
     text(ctx, txt, 0, 0, { fill: s.captionColor, stroke: s.captionStrokeColor, sw: s.captionStrokeWidth * k, align });
     ctx.restore();
+    const x0 = align === 'left' ? x : x - tw / 2;
+    return { x0, x1: x0 + tw, y0: y - size * 0.6, y1: y + size * 0.6 };
   }
 
   function drawList(ctx, W, H, P, k, o) {
@@ -213,6 +226,8 @@ const R = (() => {
     const hiP = o.curPlaceId ? easeInOut(clamp(o.local / T, 0, 1)) : 0;
     const dim = clamp(s.revealedOpacity != null ? s.revealedOpacity : 0.45, 0, 1);
     ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+    let right = x + size * 1.6;   // right edge of what the list actually drew (numbers + captions)
+    const grow = b => { if (b && b.x1 > right) right = b.x1; };
     P.places.forEach((pl, i) => {
       const y = y0 + i * gap; const isCur = pl.id === o.curPlaceId;
       const color = s.medalColors && i < 3 ? MEDAL[i] : s.numberColor;
@@ -228,19 +243,21 @@ const R = (() => {
         text(ctx, label, x, y, { fill: color, stroke: s.strokeColor, sw: s.strokeWidth * k, align: 'left' });
       }
       if (isCur) {
-        if (o.caption) drawCaption(ctx, W, P, k, o.caption, tx, y, 'left', { alpha: o.capAlpha, pop: o.capAlpha });
+        if (o.caption) grow(drawCaption(ctx, W, P, k, o.caption, tx, y, 'left', { alpha: o.capAlpha, pop: o.capAlpha }));
       } else if (o.revealed.has(pl.id) && dim > 0) {
         // Already shown places keep their caption, semi-transparent; the place that just ended dims smoothly.
         const t = pl.name || o.revealed.get(pl.id);
         const a = pl.id === o.prevPlaceId ? 1 - (1 - dim) * dimP : dim;
-        if (t) drawCaption(ctx, W, P, k, t, tx, y, 'left', { alpha: a, pop: null });
+        if (t) grow(drawCaption(ctx, W, P, k, t, tx, y, 'left', { alpha: a, pop: null }));
       }
     });
+    R.boxes.list = { x: (x - size * 0.2) / W, y: (y0 - gap / 2) / H, w: (right - x + size * 0.4) / W, h: (n * gap) / H };
   }
 
   /* frame: { seg, index, video, segs } (seg may be undefined for empty project) */
   function drawFrame(ctx, W, H, P, f) {
     const s = P.style; const k = W / 1080; const lay = layout(W, H, s);
+    R.boxes = { title: null, list: null, caption: null };
     ctx.save();
     ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
     const seg = f && f.seg;
@@ -266,9 +283,26 @@ const R = (() => {
     const capAlpha = seg && seg.clip.caption ? easeInOut(clamp((local - start) / transitionOf(s), 0, 1)) : 0;
     const inList = s.captionPos === 'list' && curPlaceId;
     drawList(ctx, W, H, P, k, { curPlaceId, prevPlaceId, revealed, local, caption: inList && seg.clip.caption ? seg.clip.caption : null, capAlpha });
-    if (seg && seg.clip.caption && !inList) drawCaption(ctx, W, P, k, seg.clip.caption, W * s.captionX / 100, H * s.captionY / 100, 'center', { alpha: capAlpha, pop: capAlpha });
+    if (seg && seg.clip.caption && !inList) {
+      const b = drawCaption(ctx, W, P, k, seg.clip.caption, W * s.captionX / 100, H * s.captionY / 100, 'center', { alpha: Math.max(capAlpha, 0.002), pop: capAlpha });
+      if (b) R.boxes.caption = { x: b.x0 / W, y: b.y0 / H, w: (b.x1 - b.x0) / W, h: (b.y1 - b.y0) / H };
+    }
     ctx.restore();
   }
 
-  return { hexA, fontOf, layout, roundRect, text, parseRich, cropRect, fitTransform, drawClipVideo, drawFrame, drawPlaceholder, captionStart, transitionOf };
+  /* Which drawn elements fall into areas covered by the YouTube Shorts interface. */
+  function safeIssues() {
+    const out = [];
+    const names = { title: 'Заголовок', list: 'Список мест', caption: 'Подпись' };
+    for (const key of ['title', 'list', 'caption']) {
+      const b = R.boxes[key]; if (!b) continue;
+      if (b.y < SAFE.top) out.push(`${names[key]} заходит в верхнюю зону (название канала и кнопки YouTube).`);
+      if (b.y + b.h > SAFE.bottom) out.push(`${names[key]} заходит в нижнюю зону (описание и кнопки YouTube).`);
+      if (b.x + b.w > SAFE.right && b.y < SAFE.rightBottom && b.y + b.h > SAFE.rightTop) out.push(`${names[key]} заходит под правые кнопки YouTube (лайк, комментарии).`);
+    }
+    return out;
+  }
+
+  const R = { hexA, fontOf, layout, roundRect, text, parseRich, cropRect, fitTransform, drawClipVideo, drawFrame, drawPlaceholder, captionStart, transitionOf, safeIssues, boxes: { title: null, list: null, caption: null } };
+  return R;
 })();
