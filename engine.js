@@ -96,9 +96,20 @@ class Engine {
     if (tok !== this.token || !this.playing) return;
     this.emit('state');
     cancelAnimationFrame(this.raf); this.raf = requestAnimationFrame(this.loop);
+    this._scheduleEnd();
   }
 
-  _stop() { this.playing = false; cancelAnimationFrame(this.raf); this.pool.forEach(v => v.pause()); }
+  _stop() { this.playing = false; cancelAnimationFrame(this.raf); clearTimeout(this.endTimer); this.pool.forEach(v => v.pause()); }
+
+  /* The end of a fragment is detected by an exact timer as well as by the render loop: on a slow device the
+     loop may run at only a few frames per second, and the video would otherwise play past the out point. */
+  _scheduleEnd() {
+    clearTimeout(this.endTimer);
+    if (!this.playing || this.cur < 0) return;
+    const seg = this.segs[this.cur], v = this.pool[this.cur % 2], tok = this.token;
+    const remain = seg.dur - (v.currentTime - (seg.clip.trimStart || 0));
+    this.endTimer = setTimeout(() => { if (this.playing && tok === this.token && !this._adv) this._advance(); }, Math.max(0, remain * 1000 - 6));
+  }
   pause() { this.token++; this._stop(); this.emit('state'); this.emit('time', this.time(), this.total); }
 
   loop() {
@@ -111,6 +122,13 @@ class Engine {
   }
 
   async _advance() {
+    if (this._adv) return;            // the timer and the render loop may both notice the end of a fragment
+    this._adv = true;
+    try { await this._advanceInner(); } finally { this._adv = false; }
+  }
+
+  async _advanceInner() {
+    clearTimeout(this.endTimer);
     const tok = this.token;
     this.pool[this.cur % 2].pause();
     if (this.cur + 1 >= this.segs.length) {
@@ -128,6 +146,7 @@ class Engine {
     this.emit('clip', ni);
     this._preload(ni + 1);
     this.raf = requestAnimationFrame(this.loop);
+    this._scheduleEnd();
   }
 
   draw() {

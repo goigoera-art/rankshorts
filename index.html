@@ -10,7 +10,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Montserrat:wght@900&family=Oswald:wght@700&family=Roboto+Condensed:wght@800&family=Rubik:wght@800&family=Russo+One&family=Unbounded:wght@800&display=swap">
-  <link rel="stylesheet" href="styles.css?v=20261122b">
+  <link rel="stylesheet" href="styles.css?v=20261122g">
 </head>
 <body>
   <header class="topbar">
@@ -49,7 +49,19 @@
     </aside>
 
     <section class="stage">
-      <div class="canvas-wrap"><canvas id="preview" width="720" height="1280"></canvas></div>
+      <div class="canvas-wrap">
+        <canvas id="preview" width="720" height="1280"></canvas>
+        <div id="safeOverlay" class="safe-overlay" hidden aria-hidden="true">
+          <div class="sz top"><span>YouTube: название канала, кнопки</span></div>
+          <div class="sz right"><span>лайк, комм.</span></div>
+          <div class="sz bottom"><span>YouTube: описание, музыка, подписка</span></div>
+        </div>
+      </div>
+      <div class="stage-tools">
+        <label class="check"><input type="checkbox" id="safeToggle"> Безопасные зоны Shorts</label>
+        <label class="check"><input type="checkbox" id="dragToggle"> Двигать текст в кадре</label>
+      </div>
+      <div id="safeWarn" class="safe-warn"></div>
       <div class="transport">
         <button id="playBtn" class="play" type="button" title="Воспроизвести (пробел)">▶</button>
         <input id="scrub" type="range" min="0" max="1000" value="0" step="1" aria-label="Позиция">
@@ -57,6 +69,17 @@
         <button id="muteBtn" class="ghost icon" type="button" title="Звук предпросмотра">🔊</button>
       </div>
       <div id="nowInfo" class="now"></div>
+      <section class="timeline" aria-label="Таймлайн">
+        <div class="tl-top">
+          <b>Таймлайн</b><small id="tlInfo"></small>
+          <span class="sp"></span>
+          <button type="button" class="small" id="tlSplit" title="Разрезать фрагмент под позицией в предпросмотре (клавиша S)">✂ Разделить</button>
+          <button type="button" class="small" id="tlDup" title="Независимая копия выбранного фрагмента (клавиша D)">⧉ Дублировать</button>
+          <button type="button" class="small danger" id="tlDel" title="Удалить выбранный фрагмент">✕ Удалить</button>
+        </div>
+        <div class="tl-scroll"><div id="tlTrack" class="tl-track"></div><div id="tlHead" class="tl-playhead"></div></div>
+        <small class="tl-hint">Щелчок по фрагменту — перейти в него, перетаскивание — поменять порядок. Показаны фрагменты в порядке показа, ширина = длительность.</small>
+      </section>
     </section>
 
     <aside class="panel right">
@@ -72,10 +95,10 @@
 
   <div id="toasts" class="toasts" aria-live="polite"></div>
 
-  <script src="util.js?v=20261122b"></script>
-  <script src="render.js?v=20261122b"></script>
-  <script src="watermark.js?v=20261122b"></script>
-  <script src="engine.js?v=20261122b"></script>
-  <script src="app.js?v=20261122b"></script>
+  <script src="util.js?v=20261122g"></script>
+  <script src="render.js?v=20261122g"></script>
+  <script src="watermark.js?v=20261122g"></script>
+  <script src="engine.js?v=20261122g"></script>
+  <script src="app.js?v=20261122g"></script>
 </body>
 </html>
